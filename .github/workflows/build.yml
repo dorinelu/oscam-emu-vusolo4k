@@ -21,17 +21,39 @@ jobs:
 
       - name: Install ARM hard-float toolchain and target libraries
         run: |
-          sudo dpkg --add-architecture armhf
           sudo apt-get update
           sudo apt-get install -y \
             gcc-arm-linux-gnueabihf \
             binutils-arm-linux-gnueabihf \
             libc6-dev-armhf-cross \
-            libssl-dev:armhf \
-            libusb-1.0-0-dev:armhf \
-            file \
-            git \
-            make
+            file git make perl autoconf automake libtool pkg-config
+
+      - name: Build static OpenSSL for ARM
+        run: |
+          git clone --depth 1 --branch openssl-3.0.18 https://github.com/openssl/openssl.git
+          cd openssl
+          ./Configure linux-armv4 no-shared no-tests \
+            --cross-compile-prefix=arm-linux-gnueabihf- \
+            --prefix="$GITHUB_WORKSPACE/arm-sysroot/usr"
+          make -j"$(nproc)"
+          make install_sw
+
+      - name: Build static libusb for ARM
+        run: |
+          git clone --depth 1 https://github.com/libusb/libusb.git
+          cd libusb
+          ./autogen.sh
+          CC=arm-linux-gnueabihf-gcc \
+          AR=arm-linux-gnueabihf-ar \
+          RANLIB=arm-linux-gnueabihf-ranlib \
+          ./configure \
+            --host=arm-linux-gnueabihf \
+            --disable-shared \
+            --enable-static \
+            --disable-udev \
+            --prefix="$GITHUB_WORKSPACE/arm-sysroot/usr"
+          make -j"$(nproc)"
+          make install
 
       - name: Clone latest OSCam-Emu source
         run: |
@@ -80,6 +102,10 @@ jobs:
             CROSS=arm-linux-gnueabihf- \
             USE_LIBUSB=1 \
             USE_LIBCRYPTO=1 \
+            LIBUSB_FLAGS="-I$GITHUB_WORKSPACE/arm-sysroot/usr/include/libusb-1.0" \
+            LIBUSB_LIB="$GITHUB_WORKSPACE/arm-sysroot/usr/lib/libusb-1.0.a" \
+            LIBCRYPTO_FLAGS="-I$GITHUB_WORKSPACE/arm-sysroot/usr/include" \
+            LIBCRYPTO_LIB="$GITHUB_WORKSPACE/arm-sysroot/usr/lib/libcrypto.a" \
             CONF_DIR=/etc/tuxbox/config/oscam-emu
 
       - name: Collect and validate binary

@@ -1,0 +1,136 @@
+name: Build OSCam-Emu Vu+ Solo 4K
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/build.yml"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM hard-float toolchain and target libraries
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf \
+            binutils-arm-linux-gnueabihf \
+            libc6-dev-armhf-cross \
+            libssl-dev:armhf \
+            libusb-1.0-0-dev:armhf \
+            file \
+            git \
+            make
+
+      - name: Clone latest OSCam-Emu source
+        run: |
+          git clone --depth 1 https://github.com/oscam-mirror/oscam-emu.git oscam
+          cd oscam
+          echo "Source commit: $(git rev-parse --short HEAD)"
+          echo "OSCam version: $(./config.sh --oscam-version)"
+
+      - name: Configure features to match Vu+ Solo 4K build
+        working-directory: oscam
+        run: |
+          ./config.sh --restore
+
+          ./config.sh --enable \
+            WEBIF WEBIF_LIVELOG WEBIF_JQUERY WEBIF_WIKI WITH_COMPRESS_WEBIF \
+            HAVE_DVBAPI WITH_EXTENDED_CW READ_SDT_CHARSETS \
+            CS_ANTICASC WITH_DEBUG MODULE_MONITOR WITH_LB \
+            CS_CACHEEX CS_CACHEEX_AIO CW_CYCLE_CHECK WITH_ARM_NEON \
+            WITH_EMU WITH_SOFTCAM \
+            MODULE_CAMD35 MODULE_CAMD35_TCP MODULE_NEWCAMD MODULE_CCCAM MODULE_CCCSHARE MODULE_GBOX MODULE_CONSTCW \
+            READER_NAGRA READER_NAGRA_MERLIN READER_IRDETO READER_CONAX READER_CRYPTOWORKS \
+            READER_SECA READER_VIACCESS READER_VIDEOGUARD READER_DRE READER_TONGFANG \
+            READER_BULCRYPT READER_GRIFFIN READER_DGCRYPT \
+            CARDREADER_PHOENIX CARDREADER_INTERNAL CARDREADER_SC8IN1 CARDREADER_MP35 CARDREADER_SMARGO
+
+          ./config.sh --disable \
+            LCDSUPPORT LEDSUPPORT CLOCKFIX IPV6SUPPORT WITH_SIGNING \
+            MODULE_CAMD33 MODULE_RADEGAST MODULE_SCAM MODULE_SERIAL MODULE_PANDORA MODULE_GHTTP MODULE_STREAMRELAY \
+            CARDREADER_DB2COM CARDREADER_STAPI CARDREADER_STAPI5 CARDREADER_STINGER CARDREADER_DRECAS
+
+          echo "=== Enabled configuration ==="
+          ./config.sh --show-enabled all
+
+      - name: Apply CacheEX V1 WebIF change
+        working-directory: oscam
+        run: |
+          sed -i 's/CacheEX Stats for ##OWN_CACHEEX_NODEID##/CacheEX Stats \/ per-service details for ##OWN_CACHEEX_NODEID##/' webif/cacheexaio/cacheex.html
+          sed -i 's/ style="display:none;"//' webif/cacheexaio/cacheex_tablerow_stats.html
+          grep -n "per-service details" webif/cacheexaio/cacheex.html
+          grep -n "CLASSNAME" webif/cacheexaio/cacheex_tablerow_stats.html
+
+      - name: Build ARMv7 hard-float OSCam-Emu
+        working-directory: oscam
+        run: |
+          make -j"$(nproc)" \
+            CROSS=arm-linux-gnueabihf- \
+            USE_LIBUSB=1 \
+            USE_LIBCRYPTO=1 \
+            CONF_DIR=/etc/tuxbox/config/oscam-emu
+
+      - name: Collect and validate binary
+        run: |
+          mkdir -p out
+          BIN="$(find oscam -maxdepth 3 -type f -name 'oscam*' -perm -111 -print | while read f; do file "$f" | grep -q 'ELF 32-bit.*ARM' && echo "$f" && break; done)"
+          if [ -z "$BIN" ]; then
+            echo "ARM OSCam binary not found."
+            find oscam -maxdepth 3 -type f -name 'oscam*' -print
+            exit 1
+          fi
+
+          cp "$BIN" out/oscam-emu-vusolo4k-cacheex-v1
+          chmod 0755 out/oscam-emu-vusolo4k-cacheex-v1
+          arm-linux-gnueabihf-strip out/oscam-emu-vusolo4k-cacheex-v1
+
+          file out/oscam-emu-vusolo4k-cacheex-v1
+          arm-linux-gnueabihf-readelf -h out/oscam-emu-vusolo4k-cacheex-v1
+          arm-linux-gnueabihf-readelf -d out/oscam-emu-vusolo4k-cacheex-v1 | grep NEEDED || true
+
+      - name: Create IPK package
+        run: |
+          VERSION="$(cd oscam && ./config.sh --oscam-version | tr -cd '0-9A-Za-z._-')"
+          mkdir -p pkg/CONTROL pkg/usr/bin
+
+          cp out/oscam-emu-vusolo4k-cacheex-v1 pkg/usr/bin/oscam-emu-vusolo4k
+          chmod 0755 pkg/usr/bin/oscam-emu-vusolo4k
+
+          cat > pkg/CONTROL/control <<EOF
+          Package: oscam-emu-vusolo4k-custom
+          Version: ${VERSION:-latest}
+          Architecture: armhf
+          Maintainer: dorinelu
+          Section: base
+          Priority: optional
+          Description: OSCam-Emu custom build for Vu+ Solo 4K with CacheEX AIO and CacheEX V1 WebIF diagnostics.
+          EOF
+
+          echo "2.0" > debian-binary
+          tar -C pkg/CONTROL -czf control.tar.gz .
+          tar -C pkg --exclude=CONTROL -czf data.tar.gz .
+          ar r out/oscam-emu-vusolo4k-cacheex-v1.ipk debian-binary control.tar.gz data.tar.gz
+
+          rm -rf pkg debian-binary control.tar.gz data.tar.gz
+          ls -lh out
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oscam-emu-vusolo4k-cacheex-v1
+          path: |
+            out/oscam-emu-vusolo4k-cacheex-v1
+            out/oscam-emu-vusolo4k-cacheex-v1.ipk
+          if-no-files-found: error

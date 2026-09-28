@@ -42,7 +42,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/libusb/libusb.git
           cd libusb
-          ./autogen.sh
+          NOCONFIGURE=1 ./autogen.sh
           CC=arm-linux-gnueabihf-gcc \
           AR=arm-linux-gnueabihf-ar \
           RANLIB=arm-linux-gnueabihf-ranlib \
